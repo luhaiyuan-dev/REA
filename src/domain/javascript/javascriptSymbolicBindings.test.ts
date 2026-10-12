@@ -438,3 +438,45 @@ it("propagates branch guards through object properties and function calls", () =
     ]);
   }
 });
+
+it("preserves object overwrite order and closure values when resolving properties", () => {
+  const parsed = parseJavaScriptSource(`
+    inspect(({ value: 1, value: 2 }).value);
+    inspect(({ value: 1, ["value"]: 3 }).value);
+    inspect(({ get value() { return 1; }, value: 4 }).value);
+    inspect(({ value: 1, get value() { return 2; } }).value);
+    inspect(({ value: 1, ...{ value: 5 } }).value);
+    inspect(({ ...{ value: 1 }, value: 6 }).value);
+    inspect(({ value: 1, [unknownKey]: 2 }).value);
+    inspect(({ [unknownKey]: 1, value: 7 }).value);
+    const make = value => ({ value });
+    inspect(make(8).value);
+    inspect(make(9).value);
+  `)!;
+  const state = completeSemanticSteps(
+    indexJavaScriptBindingsSteps(parsed.program),
+  );
+  const resolver = new JavaScriptSymbolicBindings(state, parsed.program);
+  const values: unknown[] = [];
+  traverseJavaScriptAst(parsed.program, {
+    enter: (node) => {
+      if (
+        t.isCallExpression(node) &&
+        t.isIdentifier(node.callee, { name: "inspect" })
+      )
+        values.push(resolver.evaluate(node.arguments[0]));
+    },
+  });
+  expect(values).toEqual([
+    { kind: "literal", value: 2 },
+    { kind: "literal", value: 3 },
+    { kind: "literal", value: 4 },
+    { kind: "unknown", reason: "accessor property" },
+    { kind: "literal", value: 5 },
+    { kind: "literal", value: 6 },
+    { kind: "unknown", reason: "dynamic property overwrite" },
+    { kind: "literal", value: 7 },
+    { kind: "literal", value: 8 },
+    { kind: "literal", value: 9 },
+  ]);
+});

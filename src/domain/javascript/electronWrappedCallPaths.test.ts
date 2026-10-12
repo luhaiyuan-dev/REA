@@ -520,3 +520,42 @@ it("does not trust helper names or follow returns after a definite throw", () =>
     expect(result.electron.call_paths ?? []).toEqual([]);
   }
 });
+
+describe("wrapped Electron mutation identity", () => {
+  it.each([
+    "const ipc = e.ipcMain; delete ipc.on;",
+    "const ipc = e.ipcMain; ipc.on++;",
+    'require("electron").ipcMain = replacement;',
+    "({ on: e.ipcMain.on } = replacement);",
+    "for (e.ipcMain.on of replacements) {}",
+    'Object.defineProperty(e.ipcMain, "on", { value: replacement });',
+  ])(
+    "does not restore a visibly overwritten IPC method through a wrapper: %s",
+    (write) => {
+      const result = analyzeJavaScriptStaticSource(`
+      const e = require("electron");
+      ${write}
+      function register(channel, handler) { e.ipcMain.on(channel, handler); }
+      register("overwritten:channel", event => event.sender.copy());
+    `);
+      expect(result.electron.ipc).toEqual([]);
+      expect(result.electron.call_paths ?? []).toEqual([]);
+    },
+  );
+  it("keeps untouched IPC methods available when a sibling method is overwritten", () => {
+    const result = analyzeJavaScriptStaticSource(`
+      const e = require("electron");
+      delete require("electron").ipcMain.on;
+      function listen(channel, handler) { e.ipcMain.on(channel, handler); }
+      function handle(channel, handler) { e.ipcMain.handle(channel, handler); }
+      listen("overwritten:channel", event => event.sender.copy());
+      handle("untouched:channel", event => event.sender.copy());
+    `);
+    expect(
+      result.electron.ipc.filter(({ channel }) => channel !== null),
+    ).toMatchObject([{ channel: "untouched:channel", operation: "handle" }]);
+    expect(result.electron.call_paths).toMatchObject([
+      { channel: "untouched:channel", terminal: "ipc-event.sender.copy" },
+    ]);
+  });
+});
