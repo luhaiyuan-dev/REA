@@ -21,6 +21,11 @@ import {
 import { analysisInputErrorFromIssues } from "../inputIssueProjection.js";
 import { projectBinaryLayoutView } from "./binaryLayoutView.js";
 import { projectJavaScriptApplicationView } from "./javascriptApplicationView.js";
+import {
+  projectWebNetworkApiSurfaceView,
+  apiSurfaceFields,
+  apiSurfaceViewSchema,
+} from "./webNetworkApiSurfaceView.js";
 import { projectNativeFunctionView } from "./nativeFunctionView.js";
 
 /** Public name of the selected-view workflow. */
@@ -109,6 +114,7 @@ export const analysisViewRequestSchema = z.discriminatedUnion("kind", [
   itemViewSchema,
   pageViewSchema,
   nativeViewSchema,
+  apiSurfaceViewSchema,
 ]);
 
 /** Inline Evidence or an exact same-session retained reference. */
@@ -178,6 +184,32 @@ const javascriptSummarySchema = z.strictObject({
   limitation_count: z.number().int().nonnegative(),
 });
 
+const summaryViewResultFields = {
+  kind: z.literal("summary"),
+  view: summaryViewSchema,
+  parent_evidence_id: prefixedDigestSchema("ev"),
+  parent_digest: digestSchema,
+  view_digest: digestSchema,
+  artifact: artifactSchema,
+  coverage: coverageSchema,
+  limitations: z.array(z.string()),
+  unknowns: z.array(z.string()),
+} as const;
+
+/** Summary `inspect_binary_layout` detail returns; no other view kind. */
+export const binaryLayoutSummaryViewResultSchema = z.strictObject({
+  ...summaryViewResultFields,
+  summary: layoutSummarySchema,
+  parent_operation: z.literal("inspect_binary_layout"),
+});
+
+/** Summary `analyze_javascript_application` detail returns; no other view kind. */
+export const javascriptApplicationSummaryViewResultSchema = z.strictObject({
+  ...summaryViewResultFields,
+  summary: javascriptSummarySchema,
+  parent_operation: z.literal("analyze_javascript_application"),
+});
+
 const viewResultBase = {
   parent_evidence_id: prefixedDigestSchema("ev"),
   parent_operation: z.enum([
@@ -195,6 +227,17 @@ const viewResultBase = {
 
 /** Projected facts for one selected view of retained analysis Evidence. */
 export const analysisViewResultSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    ...viewResultBase,
+    ...apiSurfaceFields,
+    kind: z.literal("api-surface"),
+    parent_operation: z.literal("inspect_web_network_capture"),
+    view: apiSurfaceViewSchema,
+    artifact: z.strictObject({
+      path: z.string(),
+      sha256: digestSchema.nullable(),
+    }),
+  }),
   z.strictObject({
     kind: z.literal("summary"),
     view: summaryViewSchema,
@@ -242,6 +285,8 @@ export interface AnalysisViewParent {
   readonly normalizedResult: unknown;
   readonly limitations: readonly string[];
   readonly artifact?: { readonly path: string; readonly sha256: string } | null;
+  /** Parent Evidence parameters, when the parent operation records them. */
+  readonly parameters?: unknown;
 }
 
 /** Construct a typed input failure for one selected-view constraint. */
@@ -252,6 +297,10 @@ export const analysisViewInputError = (
 
 /** View payload before the content digest is attached. */
 export type UnsignedAnalysisView =
+  | Omit<
+      Extract<AnalysisViewResult, { readonly kind: "api-surface" }>,
+      "view_digest"
+    >
   | Omit<
       Extract<AnalysisViewResult, { readonly kind: "summary" }>,
       "view_digest"
@@ -347,6 +396,13 @@ export const projectAnalysisView = (
         },
       ]),
     );
+  if (
+    view.kind === "api-surface" ||
+    parent.operation === "inspect_web_network_capture"
+  ) {
+    const projected = projectWebNetworkApiSurfaceView(parent, view);
+    return projected.ok ? ok(sealAnalysisView(projected.value)) : projected;
+  }
   if (parent.operation === "inspect_binary_layout") {
     const layout = binaryLayoutSchema.safeParse(parent.normalizedResult);
     if (!layout.success)

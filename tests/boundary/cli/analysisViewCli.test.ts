@@ -1,3 +1,6 @@
+import { apiSurfaceHar } from "../../fixtures/historicalHar.js";
+import { parseEvidence } from "../../../src/domain/evidence.js";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -216,3 +219,80 @@ for (const [view, reason] of [
     },
   );
 }
+
+cliTest(
+  "decodes HAR credentials and projects recorded API paths through the compiled workflows",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-surface-cli-");
+    const fixture = apiSurfaceHar();
+    const entry = fixture.log.entries[0]!;
+    const urls = [
+      "https://user:password@api.example.test/a/%2e%2e/admin?token=ordinary#fragment",
+      "https://api.example.test/admin",
+      "https:user:password@api.example.test/path",
+      "https:///user:password@api.example.test/path",
+    ];
+    fixture.log.entries.push(
+      ...urls.map((url) => ({
+        ...entry,
+        request: { ...entry.request, url },
+      })),
+    );
+    const bytes = JSON.stringify(fixture);
+    const capturePath = join(root, "capture.har");
+    const input = join(root, "view.json");
+    const environment = {
+      HOME: root,
+      XDG_CONFIG_HOME: root,
+      XDG_CACHE_HOME: root,
+    };
+    await writeFile(capturePath, bytes);
+    const capture = await cli.run({
+      arguments: ["inspect-web-network-capture", capturePath, "har", "--json"],
+      environment,
+    });
+    expect(capture.exitCode, capture.stdout).toBe(0);
+    const parent = parseEvidence(capture.json);
+    expect(parent.subject?.digest.sha256).toBe(
+      createHash("sha256").update(bytes).digest("hex"),
+    );
+    expect(JSON.stringify(parent)).not.toContain("password");
+    await writeFile(
+      input,
+      JSON.stringify({
+        source: { kind: "inline", evidence: parent },
+        view: { kind: "api-surface" },
+      }),
+    );
+    const result = await cli.run({
+      arguments: ["inspect-analysis-view", input, "--json"],
+      environment,
+    });
+    expect(result.exitCode, result.stdout).toBe(0);
+    expect(result.json).toMatchObject({
+      confidence: "inferred",
+      evidence_links: [parent.evidence_id],
+      normalized_result: {
+        kind: "api-surface",
+        records: { examined: 17, total: 17, excluded: 2 },
+        coverage: { total: 14, exhausted: true },
+        groups: expect.arrayContaining([
+          expect.objectContaining({
+            path_template: "/a/%2e%2e/admin",
+            record_ordinals: [13],
+          }),
+          expect.objectContaining({
+            path_template: "/admin",
+            record_ordinals: [14],
+          }),
+        ]),
+        excluded_records: [
+          { ordinal: 15, reason: "url-redacted" },
+          { ordinal: 16, reason: "url-redacted" },
+        ],
+      },
+    });
+    expect(JSON.stringify(result.json)).not.toContain("password");
+    expect(JSON.stringify(result.json)).not.toContain("ordinary");
+  },
+);

@@ -108,6 +108,36 @@ describe("wrapped Electron control-flow alternatives", () => {
   });
 });
 
+describe("wrapped Electron API identity", () => {
+  it("does not restore rejected Electron identities through wrapper substitution", () => {
+    for (const source of [
+      `const e=require("electron");e.ipcMain={on(){}};e.ipcMain.on("bad",event=>event.sender.copy());`,
+      `function require(){return {ipcMain:{on(){}}}};const e=require("electron");e.ipcMain.on("bad",event=>event.sender.copy());`,
+      `const e=require("electron");const ipc=e.ipcRenderer,alias=ipc;delete alias.send;function send(channel){ipc.send(channel)}send("bad");`,
+      `require("electron/renderer").ipcRenderer={};const e=require("electron");function send(channel){e.ipcRenderer.send(channel)}send("bad");`,
+      `const e=require("electron");[e.ipcRenderer]=replacements;function send(channel){e.ipcRenderer.send(channel)}send("bad");`,
+      `const e=require("electron");for(e.contextBridge of replacements){}function expose(api){e.contextBridge.exposeInMainWorld("api",api)}expose({copy:()=>navigator.clipboard.writeText("bad")});`,
+      `const e=require("electron");const ipc=e.ipcRenderer;Reflect.deleteProperty(ipc,"send");function send(channel){ipc.send(channel)}send("bad");`,
+    ]) {
+      const { electron } = analyzeJavaScriptStaticSource(source);
+      expect(electron.call_paths ?? []).toEqual([]);
+      expect(electron.ipc).toEqual([]);
+      expect(electron.context_bridge_apis).toEqual([]);
+    }
+  });
+  it("keeps unaffected Electron methods available after a sibling method write", () => {
+    const { electron } = analyzeJavaScriptStaticSource(`
+      const e=require("electron");
+      delete e.ipcRenderer.send;
+      function invoke(channel){e.ipcRenderer.invoke(channel)}
+      invoke("good");
+    `);
+    expect(electron.ipc).toContainEqual(
+      expect.objectContaining({ channel: "good", operation: "invoke" }),
+    );
+  });
+});
+
 describe("wrapped Electron call paths", () => {
   it("connects exposed closures to IPC sends and text clipboard calls", () => {
     const result = analyzeJavaScriptStaticSource(
@@ -162,15 +192,6 @@ describe("wrapped Electron call paths", () => {
         conditions: [expect.objectContaining({ expression: "allowed(event)" })],
       }),
     );
-  });
-  it("does not identify overwritten Electron namespaces or shadowed require", () => {
-    for (const source of [
-      `const e=require("electron");e.ipcMain={on(){}};e.ipcMain.on("bad",event=>event.sender.copy());`,
-      `function require(){return {ipcMain:{on(){}}}};const e=require("electron");e.ipcMain.on("bad",event=>event.sender.copy());`,
-    ])
-      expect(
-        analyzeJavaScriptStaticSource(source).electron.call_paths ?? [],
-      ).toEqual([]);
   });
   it("does not follow a statically false callback branch", () => {
     const result = analyzeJavaScriptStaticSource(
