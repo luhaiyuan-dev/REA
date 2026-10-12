@@ -115,3 +115,74 @@ it("bounds compiler stderr after explicit redaction at UTF-8 boundaries", () => 
   expect(failureCause.compiler_outcome.stderr).not.toContain(sensitiveValue);
   expect(failureCause.compiler_outcome.stderr).not.toContain("\uFFFD");
 });
+
+it("redacts command output before bounding each UTF-8 stream", () => {
+  const token = "transport-token";
+  const replacement = "é".repeat(600);
+  const stdout = `${"é".repeat(3900)}${token}`;
+  const stderr = `${token}${"€".repeat(3000)}`;
+  const cause = Object.assign(new Error("LaunchSupport failed"), {
+    code: null,
+    signal: "SIGTERM",
+    killed: true,
+    stdout,
+    stderr,
+  });
+  const projectFailure = bindGhidraSessionFailure(
+    () => ({}),
+    (value) => value.replaceAll(token, replacement),
+  );
+  const diagnostics = projectFailure(
+    "start",
+    "Ghidra launcher failed",
+    cause,
+  ).diagnostics;
+
+  expect(diagnostics).toMatchObject({
+    failure_cause: {
+      signal: "SIGTERM",
+      command_outcome: {
+        stdout: "é".repeat(4096),
+        stderr: `${replacement}${"€".repeat(2330)}`,
+        stdoutBytes: Buffer.byteLength(stdout, "utf8"),
+        stderrBytes: Buffer.byteLength(stderr, "utf8"),
+        stdoutTruncated: true,
+        stderrTruncated: true,
+        outputTruncated: false,
+        killed: true,
+      },
+    },
+  });
+  expect(JSON.stringify(diagnostics)).not.toContain(token);
+  expect(JSON.stringify(diagnostics)).not.toContain("\uFFFD");
+});
+
+it("retains capture truncation separately from diagnostic output bounds", () => {
+  const cause = Object.assign(new Error("stdout maxBuffer length exceeded"), {
+    code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+    signal: null,
+    killed: true,
+    stdout: "partial stdout",
+    stderr: "",
+  });
+  const projectFailure = bindGhidraSessionFailure(() => ({}));
+
+  expect(
+    projectFailure("start", "Ghidra launcher failed", cause).diagnostics,
+  ).toMatchObject({
+    failure_cause: {
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+      signal: null,
+      command_outcome: {
+        stdout: "partial stdout",
+        stderr: "",
+        stdoutBytes: 14,
+        stderrBytes: 0,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        outputTruncated: true,
+        killed: true,
+      },
+    },
+  });
+});
